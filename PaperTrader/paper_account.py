@@ -34,6 +34,96 @@ class ORDER_DIRECTION:
     OTHER = 6
 
 
+class ORDER_STATUS:
+    """订单的买卖方向
+    BUY 股票 买入
+    SELL 股票 卖出
+    BUY_OPEN 期货 多开
+    BUY_CLOSE 期货 空平(多头平旧仓)
+    SELL_OPEN 期货 空开
+    SELL_CLOSE 期货 多平(空头平旧仓)
+    ASK  申购
+    """
+
+    WAIT = 0
+    DONE = 1
+
+
+class MARKET:
+    stock_cn = "stock_cn"
+
+
+class Paperorder:
+    def __init__(self,
+                 code: str,
+                 order_time: datetime,
+                 order_price: float,
+                 order_volume: int,
+                 order_type: int,
+                 commisson: float = 0.0001,
+                 tax_percent: float = 0.001,
+                 order_id=str(uuid.uuid1())):
+        self.code = code
+        self.order_time = order_time
+        self.order_price = order_price
+        self.order_volume = order_volume
+
+        self.deal_time = None
+        self.deal_price = None
+        self.deal_volume = None
+
+        self.order_type = order_type
+        self.commisson = commisson
+        self.tax_percent = tax_percent
+        self.order_id = order_id
+        self.status = ORDER_STATUS.WAIT
+
+    @property
+    def frozen_money(self):
+        return self.order_price * self.order_volume * (1 + self.commisson)
+
+    @property
+    def sell_money(self):
+        if self.order_type == ORDER_DIRECTION.SELL:
+            return self.deal_price * self.order_volume * (1 - self.commisson - self.tax_percent)
+        else:
+            return None
+
+    @property
+    def deal_money(self):
+        if self.deal_price:
+            return self.deal_price * self.order_volume * (1 + self.commisson)
+        else:
+            return None
+
+    @property
+    def deal_commisson(self):
+        if self.deal_price:
+            return self.deal_price * self.order_volume * self.commisson
+        else:
+            return None
+
+    @property
+    def deal_tax(self):
+        if self.order_type == ORDER_DIRECTION.SELL:
+            return self.deal_price * self.order_volume * self.tax_percent
+        else:
+            return None
+
+    @property
+    def order_position(self) -> dict:
+        """转化order为持仓类需要的数据"""
+        positon_dict = {"order_id": self.order_id,
+                        "order_type": self.order_type,
+                        "price": self.deal_price,
+                        "volume": self.deal_volume if self.order_type in [ORDER_DIRECTION.BUY] else self.deal_volume * (
+                            -1),
+                        "commission": self.deal_commisson,
+                        "tax": self.deal_tax,
+                        "datetime": self.deal_time}
+        return positon_dict
+
+
 class Paperpositon:
     """
     order_history 样例
@@ -42,8 +132,8 @@ class Paperpositon:
 
     def __init__(self,
                  code: str,
-                 code_type: str = "stock_cn",
-                 t: int = 1,  # t+1
+                 t: int,  # t+1
+                 code_type: str,
                  ):
         self.code = code
         self.code_type = code_type  # 预留，处理期货时算法与A股不一致
@@ -51,9 +141,8 @@ class Paperpositon:
         self.cbj = None
         self.gpye = 0
         self.djsl = 0
-        self.order_history = pd.DataFrame(
-            columns=["order_id", "direction", "price", "volume", "commission", "tax", "is_frozen",
-                     "datetime"])  # 当平仓时候，volume为负数
+        self.order_history = pd.DataFrame(columns=["order_id", "order_type", "price", "volume",
+                                                   "commission", "tax", "datetime"])  # 当平仓时候，volume为负数
         self.old_history = list()
 
     def __repr__(self):
@@ -69,13 +158,12 @@ class Paperpositon:
     def kyye(self):
         return self.gpye - self.djsl
 
-    def add_order(self, order_info):
-        self.order_history.append(order_info, ignore_index=True)
-        self.cpt_current()
+    def add_order(self, order_info: Paperorder, current_time: datetime):
+        self.order_history.append(order_info.order_position, ignore_index=True)
+        self.cpt_current(current_time)
 
-    def cpt_current(self):
+    def cpt_current(self, current_time):
         """计算当前仓位的成本价喝持仓数量喝可用金额等"""
-        global current_time
         if self.code_type == "stock_cn":
             self.gpye = self.order_history.volume.sum()
             if self.gpye == 0 and self.order_history.shape[0] > 0:
@@ -94,7 +182,7 @@ class Paperpositon:
                 pass
 
 
-class Paperaccount:
+class Papertest:
     """
     基于bar base的回测框架
     position 字典示例
@@ -108,16 +196,18 @@ class Paperaccount:
                  tax: float = 0.001,
                  t: int = 1):
         self.cash_available = initcash
-        self.current_time = datetime(1999, 1, 1)
         self.frozen_money = 0
+
+        self.current_time = datetime(1999, 1, 1)
         self.position = dict()
         self.order = dict()
-        self.entrust = dict()
-        self.return_history = list()
+
         self.commisson = commisson
         self.tax = tax
         self.t = t
+
         self.code_current_price = dict()
+        self.return_history = list()
 
     def get_today_profit(self):
         pass
@@ -146,89 +236,106 @@ class Paperaccount:
         return 0  # todo 计算
 
     @property
-    def fudongyinkui(self):
+    def floatprofit(self):
         """浮动盈亏"""
         return
 
-    def on_price_change(self, code, current_price):
-        """更新股票当前价格code_current_price"""
-        self.code_current_price[code] = current_price
-
-    def send_order(self,
-                   code,
-                   trade_time,
-                   trade_price: float,
-                   trade_amount: int,
-                   trade_towards: int,
-                   trade_type: int = 1,
-                   order_id=str(uuid.uuid1()),
-                   trade_id=str(uuid.uuid1())):
-        """
-        :param code: 代码
-        :param trade_time: 委托时间
-        :param trade_price: 委托价格
-        :param trade_amount: 委托量
-        :param trade_towards: 买卖方向:1：开，0：平
-        :param trade_type: 买卖类型：1：多单 0：空单 默认为1
-        :param order_id:uuid
-        :param trade_id:uuid
-        :return:
-        """
-        order_create = {"code": code,
-                        "order_time": trade_time,
-                        "order_price": trade_price,
-                        "order_amount": trade_amount,
-                        "order_towards": trade_towards,
-                        "order_type": trade_type,
-                        "order_id": order_id,
-                        "trade_id": trade_id,
-                        "frozen_buy": trade_price * trade_amount,
-                        "frozen_commisson": trade_price * trade_amount * self.commisson,
-                        "status": 0}
-
-        self.frozen_money += order_create["frozen_money"]
-        self.cash_available -= order_create["frozen_money"]
-        self.entrust[order_create["order_id"]] = order_create
-        return order_create["order_id"]
-
-    def make_deal(self, order_id, deal_price: float = None):
-        """"""
-        order_success = self.entrust[order_id]
-        if deal_price is None:
-            order_success["deal_price"] = order_success["order_price"]
-        else:
-            order_success["deal_price"] = deal_price
-
-        if order_success["order_towards"] == 1 & order_success["order_type"] == 1:
-            if order_success["code"] in self.position.keys():
-                # todo 更新订单
-                self.position[order_success["code"]].add_order(self.deal_to_position(order_success))
-            else:
-                # todo 新增订单
-                self.position[order_success["code"]] = Positon(code=order_success["code"])
-                self.position[order_success["code"]].add_order(self.deal_to_position(order_success))
-
-        elif order_success["order_towards"] == 0 & order_success["order_type"] == 1:
-            self.position[order_success["code"]].add_order(self.deal_to_position(order_success))
-            # todo 账户余额变化
-            # todo 扣印花税操作
-        else:
-            print("订单未处理")
-            pass
-
-    @staticmethod
-    def deal_to_position(deal_dict: dict) -> dict:
-        """
-        转换deal字典为positon字典
-        :param deal_dict: 委托字典
-        """
-        return deal_dict
-
     def get_current_position(self):
         """获取当前持仓，取持仓股票余额大于0的票返回"""
+        pass
+
+    def get_wait_order(self):
+        """获取未完成的订单"""
+        pass
+
+    def on_current_time(self, current_time):
+        """账户时间更新"""
+        self.current_time = current_time
+        # todo 持仓状态刷新（ t+1冻结数量修改）
+
+    def on_price_change(self, code, current_price):
+        """更新股票当前价格-单个更新"""
+        self.code_current_price[code] = current_price
+
+    def on_price_change_all(self, codeprice: pd.DataFrame):
+        """更新股票当前价格-批量更新"""
+        # todo
+        pass
+
+    def send_order(self,
+                   code: str,
+                   order_time: datetime,
+                   order_price: float,
+                   order_volume: int,
+                   order_type: int = ORDER_DIRECTION.BUY,
+                   ):
+        """
+        :param code: 代码
+        :param order_time: 委托时间
+        :param order_price: 委托价格
+        :param order_volume: 委托量
+        :param order_type: 买卖类型：类 ORDER_DIRECTION
+        :return:
+        """
+        order_id = str(uuid.uuid1())
+
+        order_create = Paperorder(code=code,
+                                  order_time=order_time,
+                                  order_price=order_price,
+                                  order_volume=order_volume,
+                                  order_type=order_type,
+                                  commisson=self.commisson,
+                                  tax=self.tax,
+                                  order_id=order_id
+                                  )
+        if order_type == ORDER_DIRECTION.BUY:
+            order_frozen_money = order_create.order_price * order_create.order_volume * (1 + self.commisson)
+            self.frozen_money += order_frozen_money
+            self.cash_available -= order_frozen_money
+        self.order[order_id] = order_create
+        return order_id
+
+    def make_deal(self, order_id, deal_volume: int = None, deal_price: float = None, deal_time: datetime = None):
+        """成交订单"""
+
+        if deal_volume is None:
+            self.order[order_id].deal_volume = self.order[order_id].order_volume
+        else:
+            self.order[order_id].deal_volume = deal_volume
+
+        if deal_price is None:
+            self.order[order_id].deal_price = self.order[order_id].order_price
+        else:
+            self.order[order_id].deal_price = deal_price
+
+        if deal_time is None:
+            self.order[order_id].deal_time = self.order[order_id].order_time
+        else:
+            self.order[order_id].deal_time = deal_time
+
+        if self.order[order_id].order_type == ORDER_DIRECTION.BUY:
+            if self.order[order_id].code not in self.position.keys():
+                self.position[self.order[order_id].code] = Paperpositon(code=self.order[order_id].code,
+                                                                        t=self.t,
+                                                                        code_type=MARKET.stock_cn)
+
+            self.position[self.order[order_id].code].add_order(self.order[order_id], self.current_time)
+            self.frozen_money -= self.order[order_id].frozen_money
+            self.cash_available += self.order[order_id].frozen_money - self.order[order_id].deal_money
+
+        elif self.order[order_id].order_type == ORDER_DIRECTION.SELL:
+            self.position[self.order[order_id].code].add_order(self.order[order_id], self.current_time)
+            self.cash_available += self.order[order_id].sell_money
+
+        else:
+            print("订单未处理")
+            return None
+
+        # 订单状态完成
+        self.order[order_id].order_status = ORDER_STATUS.DONE
 
 
 if __name__ == '__main__':
-    current_time = datetime(1999, 1, 1)
+    # current_time = datetime(1999, 1, 1)
 
     pass
