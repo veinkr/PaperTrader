@@ -9,6 +9,9 @@ import uuid
 import pandas as pd
 from datetime import datetime, timedelta
 
+order_history_temple = pd.DataFrame(columns=["order_id", "order_type", "price", "volume",
+                                             "commission", "tax", "datetime"])
+
 
 class ORDER_DIRECTION:
     """订单的买卖方向
@@ -51,6 +54,7 @@ class ORDER_STATUS:
 
 class MARKET:
     stock_cn = "stock_cn"
+    index_cn = "index_cn"
 
 
 class Paperorder:
@@ -108,7 +112,7 @@ class Paperorder:
         if self.order_type == ORDER_DIRECTION.SELL:
             return self.deal_price * self.order_volume * self.tax_percent
         else:
-            return None
+            return 0
 
     @property
     def order_position(self) -> dict:
@@ -141,8 +145,8 @@ class Paperpositon:
         self.cbj = None
         self.gpye = 0
         self.djsl = 0
-        self.order_history = pd.DataFrame(columns=["order_id", "order_type", "price", "volume",
-                                                   "commission", "tax", "datetime"])  # 当平仓时候，volume为负数
+        self.current_price = None
+        self.order_history = order_history_temple  # 当平仓时候，volume为负数
         self.old_history = list()
 
     def __repr__(self):
@@ -168,8 +172,7 @@ class Paperpositon:
             self.gpye = self.order_history.volume.sum()
             if self.gpye == 0 and self.order_history.shape[0] > 0:
                 self.old_history.append(self.order_history)
-                self.order_history = pd.DataFrame(columns=["order_id", "direction", "price", "volume",
-                                                           "commission", "tax", "datetime"])
+                self.order_history = order_history_temple
                 self.djsl = 0
                 self.cbj = None
             elif self.gpye > 0 and self.order_history.shape[0] > 0:
@@ -233,25 +236,30 @@ class Papertest:
     @property
     def positon_money(self):
         """计算持仓当前价格"""
-        return 0  # todo 计算
+        return sum([posii.gpye * self.code_current_price[codei] for codei, posii in self.get_current_position.items()])
 
     @property
-    def floatprofit(self):
+    def all_float_profit(self):
         """浮动盈亏"""
-        return
+        return sum([posii.gpye * (self.code_current_price[codei] - posii.cbj)
+                    for codei, posii in self.get_current_position.items()])
 
+    @property
     def get_current_position(self):
         """获取当前持仓，取持仓股票余额大于0的票返回"""
-        pass
+        return {codei: posii for codei, posii in self.position.items() if posii.kyye > 0}
 
     def get_wait_order(self):
         """获取未完成的订单"""
-        pass
+        return {codei: oderi for codei, oderi in self.order.items() if oderi.order_status == ORDER_STATUS.WAIT}
 
     def on_current_time(self, current_time):
         """账户时间更新"""
         self.current_time = current_time
         # todo 持仓状态刷新（ t+1冻结数量修改）
+        # todo 除权除息账户修改
+        for codei, posii in self.position.items():
+            posii.cpt_current(self.current_time)
 
     def on_price_change(self, code, current_price):
         """更新股票当前价格-单个更新"""
@@ -328,7 +336,7 @@ class Papertest:
             self.cash_available += self.order[order_id].sell_money
 
         else:
-            print("订单未处理")
+            print(f"""订单未处理:{order_id}""")
             return None
 
         # 订单状态完成
