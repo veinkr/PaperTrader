@@ -9,7 +9,7 @@ import uuid
 import pandas as pd
 from datetime import datetime, timedelta
 
-order_history_temple = pd.DataFrame(columns=["order_id", "order_type", "price", "volume",
+order_history_temple = pd.DataFrame(columns=["order_id", "order_type", "price", "volume", "is_frozen",
                                              "commission", "tax", "datetime"])
 
 
@@ -39,22 +39,25 @@ class ORDER_DIRECTION:
 
 class ORDER_STATUS:
     """订单的买卖方向
-    BUY 股票 买入
-    SELL 股票 卖出
-    BUY_OPEN 期货 多开
-    BUY_CLOSE 期货 空平(多头平旧仓)
-    SELL_OPEN 期货 空开
-    SELL_CLOSE 期货 多平(空头平旧仓)
-    ASK  申购
+    WAIT 委托中，尚未成交
+    DONE 已成交
+    CANCEL 取消订单
     """
-
     WAIT = 0
     DONE = 1
+    CANCEL = 2
 
 
 class MARKET:
+    """
+    市场
+    stock_cn A股股票
+    index_cn A股指数
+    etf_cn A股ETF
+    """
     stock_cn = "stock_cn"
     index_cn = "index_cn"
+    etf_cn = "etf_cn"
 
 
 class Paperorder:
@@ -117,22 +120,20 @@ class Paperorder:
     @property
     def order_position(self) -> dict:
         """转化order为持仓类需要的数据"""
-        positon_dict = {"order_id": self.order_id,
-                        "order_type": self.order_type,
-                        "price": self.deal_price,
-                        "volume": self.deal_volume if self.order_type in [ORDER_DIRECTION.BUY] else self.deal_volume * (
-                            -1),
-                        "commission": self.deal_commisson,
-                        "tax": self.deal_tax,
-                        "datetime": self.deal_time}
+        positon_dict = {
+            "order_id": self.order_id,
+            "order_type": self.order_type,
+            "price": self.deal_price,
+            "volume": self.deal_volume if self.order_type in [ORDER_DIRECTION.BUY] else self.deal_volume * (-1),
+            "commission": self.deal_commisson,
+            "tax": self.deal_tax,
+            "is_frozen": 1 if self.order_type in [ORDER_DIRECTION.BUY] else 0,
+            "cbj_money": self.deal_money if self.order_type in [ORDER_DIRECTION.BUY] else self.sell_money * (-1),
+            "datetime": self.deal_time}
         return positon_dict
 
 
 class Paperpositon:
-    """
-    order_history 样例
-    [(1,15.6,200,,2020-03-31 09:54:16)]
-    """
 
     def __init__(self,
                  code: str,
@@ -142,16 +143,17 @@ class Paperpositon:
         self.code = code
         self.code_type = code_type  # 预留，处理期货时算法与A股不一致
         self.t = t
-        self.cbj = None
+        self.cost_money = 0
         self.gpye = 0
         self.djsl = 0
         self.current_price = None
-        self.order_history = order_history_temple  # 当平仓时候，volume为负数
+        self.order_history = order_history_temple  # tips：卖出时候，volume为负数
         self.old_history = list()
 
     def __repr__(self):
         return {"code": self.code,
-                "cbj": self.cbj,
+                "code_type": self.code_type,
+                "cost_money": self.cost_money,
                 "gpye": self.gpye,
                 "djsl": self.djsl,
                 "kyye": self.kyye,
@@ -164,25 +166,22 @@ class Paperpositon:
 
     def add_order(self, order_info: Paperorder, current_time: datetime):
         self.order_history.append(order_info.order_position, ignore_index=True)
-        self.cpt_current(current_time)
-
-    def cpt_current(self, current_time):
-        """计算当前仓位的成本价喝持仓数量喝可用金额等"""
+        self.cpt_djsl(current_time)
+        self.gpye += order_info.order_position['volume']
         if self.code_type == "stock_cn":
-            self.gpye = self.order_history.volume.sum()
-            if self.gpye == 0 and self.order_history.shape[0] > 0:
+            if self.gpye > 0 and self.order_history.shape[0] > 0:
+                self.cost_money = self.cost_money + order_info.deal_money
+            elif self.gpye == 0 and self.order_history.shape[0] > 0:
                 self.old_history.append(self.order_history)
                 self.order_history = order_history_temple
-                self.djsl = 0
-                self.cbj = None
-            elif self.gpye > 0 and self.order_history.shape[0] > 0:
-                self.djsl = self.order_history.loc[(self.order_history.datetime.apply(
-                    lambda x: x.date() >= current_time.date() + timedelta(days=self.t))) & (
-                                                           self.order_history.direction == 1), "volume"].sum()
-                self.cbj = self.order_history.apply(lambda row: row.price * row.volume - row.commission,
-                                                    axis=1).sum() / self.gpye
-            else:
-                pass
+                self.cost_money = 0
+
+    def cpt_djsl(self, current_time):
+        """计算冻结股票数量：触发时间为每次增加新订单后或者"""
+        self.order_history.loc[
+            (self.order_history.datetime.apply(lambda x: x.date()) >= current_time.date() + timedelta(days=self.t)) & (
+                    self.order_history.direction == ORDER_DIRECTION.BUY), "is_frozen"] = 0
+        self.djsl = self.order_history.loc[self.order_history.is_frozen == 1, "volume"].sum()
 
 
 class Papertest:
@@ -196,7 +195,7 @@ class Papertest:
     def __init__(self,
                  initcash: int = 100000,
                  commisson: float = 0.0001,
-                 tax: float = 0.001,
+                 tax_percent: float = 0.001,
                  t: int = 1):
         self.cash_available = initcash
         self.frozen_money = 0
@@ -206,16 +205,22 @@ class Papertest:
         self.order = dict()
 
         self.commisson = commisson
-        self.tax = tax
+        self.tax_percent = tax_percent
         self.t = t
 
         self.code_current_price = dict()
         self.return_history = list()
 
+        self.settle_history = list()
+
     def get_today_profit(self):
         pass
 
     def get_all_profit(self):
+        pass
+
+    def all_order_done(self):
+        """回测结束后的一些合并操作"""
         pass
 
     def settle(self):
@@ -227,43 +232,60 @@ class Papertest:
         3. 存储当前账户快照信息，包括仓位、总金额、可用金额等
         4.
         """
-        pass
+        settle_dict = {
+            "datetime": self.current_time,
+            "all_money": self.all_money,
+            "cash_available": self.cash_available,
+            "all_float_profit": self.all_float_profit,
+            "position": self.get_current_position}
+        self.settle_history.append(settle_dict)
 
     @property
-    def all_money(self):
+    def order_hisotry_dataframe(self) -> pd.DataFrame:
+        """获取订单历史的pandas DataFrame"""
+
+        return
+
+    @property
+    def all_money(self) -> float:
         return self.cash_available + self.frozen_money + self.positon_money
 
     @property
-    def positon_money(self):
+    def positon_money(self) -> float:
         """计算持仓当前价格"""
         return sum([posii.gpye * self.code_current_price[codei] for codei, posii in self.get_current_position.items()])
 
     @property
-    def all_float_profit(self):
+    def all_float_profit(self) -> float:
         """浮动盈亏"""
-        return sum([posii.gpye * (self.code_current_price[codei] - posii.cbj)
+        return sum([posii.gpye * (self.code_current_price[codei] - posii.cost_money)
                     for codei, posii in self.get_current_position.items()])
 
     @property
-    def get_current_position(self):
+    def get_current_position(self) -> dict:
         """获取当前持仓，取持仓股票余额大于0的票返回"""
         return {codei: posii for codei, posii in self.position.items() if posii.kyye > 0}
 
-    def get_wait_order(self):
+    def get_wait_order(self) -> dict:
         """获取未完成的订单"""
         return {codei: oderi for codei, oderi in self.order.items() if oderi.order_status == ORDER_STATUS.WAIT}
 
     def on_current_time(self, current_time):
-        """账户时间更新"""
+        """账户时间更新、t+1状态更新、除权除息更新"""
         self.current_time = current_time
-        # todo 持仓状态刷新（ t+1冻结数量修改）
+        # todo 持仓状态刷新（ t+1冻结状态修改）
         # todo 除权除息账户修改
         for codei, posii in self.position.items():
-            posii.cpt_current(self.current_time)
+            posii.cpt_djsl(self.current_time)
+
+    def cpt_dividend(self, dividend_df: pd.DataFrame):
+        pass
 
     def on_price_change(self, code, current_price):
         """更新股票当前价格-单个更新"""
         self.code_current_price[code] = current_price
+        if code in self.position.keys():
+            self.position[code].current_price = current_price
 
     def on_price_change_all(self, codeprice: pd.DataFrame):
         """更新股票当前价格-批量更新"""
@@ -276,16 +298,17 @@ class Papertest:
                    order_price: float,
                    order_volume: int,
                    order_type: int = ORDER_DIRECTION.BUY,
-                   ):
+                   order_id: str = str(uuid.uuid1())
+                   ) -> str:
         """
         :param code: 代码
         :param order_time: 委托时间
         :param order_price: 委托价格
         :param order_volume: 委托量
         :param order_type: 买卖类型：类 ORDER_DIRECTION
-        :return:
+        :param order_id: 订单id
+        :return: order_id
         """
-        order_id = str(uuid.uuid1())
 
         order_create = Paperorder(code=code,
                                   order_time=order_time,
@@ -293,7 +316,7 @@ class Papertest:
                                   order_volume=order_volume,
                                   order_type=order_type,
                                   commisson=self.commisson,
-                                  tax=self.tax,
+                                  tax_percent=self.tax_percent,
                                   order_id=order_id
                                   )
         if order_type == ORDER_DIRECTION.BUY:
@@ -336,14 +359,15 @@ class Papertest:
             self.cash_available += self.order[order_id].sell_money
 
         else:
-            print(f"""订单未处理:{order_id}""")
+            print("""订单未处理:""", order_id)
             return None
 
         # 订单状态完成
         self.order[order_id].order_status = ORDER_STATUS.DONE
 
+    def cancel_deal(self, order_id):
+        self.order[order_id].order_status = ORDER_STATUS.CANCEL
+
 
 if __name__ == '__main__':
-    # current_time = datetime(1999, 1, 1)
-
     pass
