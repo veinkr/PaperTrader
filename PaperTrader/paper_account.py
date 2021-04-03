@@ -9,8 +9,8 @@ import uuid
 import pandas as pd
 from datetime import datetime, timedelta
 
-order_history_temple = pd.DataFrame(columns=["order_id", "order_type", "price", "volume", "is_frozen",
-                                             "commission", "tax", "datetime"])
+order_history_temple = pd.DataFrame(columns=["datetime", "order_id", "order_type", "price", "volume",
+                                             "is_frozen", "commission", "tax", "money"])
 
 
 class ORDER_DIRECTION:
@@ -143,7 +143,7 @@ class Paperorder:
             "commission": self.deal_commisson,
             "tax": self.deal_tax,
             "is_frozen": 1 if self.order_type in [ORDER_DIRECTION.BUY] else 0,
-            "cbj_money": self.deal_money if self.order_type in [ORDER_DIRECTION.BUY] else self.sell_money * (-1),
+            "money": self.deal_money if self.order_type in [ORDER_DIRECTION.BUY] else self.sell_money * (-1),
             "datetime": self.deal_time}
         return positon_dict
 
@@ -234,37 +234,22 @@ class Papertest:
         self.t = t
 
         self.code_current_price = dict()
-        self.return_history = list()
 
         self.settle_history = list()
-
-    def get_today_profit(self):
-        pass
-
-    def get_all_profit(self):
-        pass
-
-    def all_order_done(self):
-        """回测结束后的一些合并操作"""
-        pass
 
     def settle(self):
         """
         结算
-        1.
-        合并持仓
-        2. 计算当前回报
-        3. 存储当前账户快照信息，包括仓位、总金额、可用金额等
-        4.
         """
         settle_dict = {
             "datetime": self.current_time,
             "all_money": self.all_money,
+            "positon_money": self.positon_money,
+            "frozen_money": self.frozen_money,
             "cash_available": self.cash_available,
             "all_float_profit": self.all_float_profit,
             "position": [posii.settle() for codei, posii in self.get_current_position.items()]}
         self.settle_history.append(settle_dict)
-        # print("settle: ", settle_dict)
 
     @property
     def order_hisotry_dataframe(self) -> pd.DataFrame:
@@ -300,8 +285,8 @@ class Papertest:
         """获取未完成的订单"""
         return {codei: oderi for codei, oderi in self.order.items() if oderi.order_status == ORDER_STATUS.WAIT}
 
-    def on_current_time(self, current_time):
-        """账户时间更新、t+1状态更新、除权除息更新"""
+    def on_current_time(self, current_time: datetime):
+        """账户时间更新、t+1状态更新(冻结股票数计算)、除权除息更新"""
         self.current_time = current_time
         # todo 除权除息账户修改
         for codei, posii in self.position.items():
@@ -310,7 +295,7 @@ class Papertest:
     def cpt_dividend(self, dividend_df: pd.DataFrame):
         pass
 
-    def on_price_change(self, code, current_price):
+    def on_price_change(self, code: str, current_price: float):
         """更新股票当前价格-单个更新"""
         self.code_current_price[code] = current_price
         if code in self.position.keys():
