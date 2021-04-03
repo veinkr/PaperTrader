@@ -83,7 +83,22 @@ class Paperorder:
         self.commisson = commisson
         self.tax_percent = tax_percent
         self.order_id = order_id
-        self.status = ORDER_STATUS.WAIT
+        self.order_status = ORDER_STATUS.WAIT
+
+    def __repr__(self):
+        return str({"code": self.code,
+                    "order_time": self.order_time,
+                    "order_price": self.order_price,
+                    "order_volume": self.order_volume,
+                    "deal_time": self.deal_time,
+                    "deal_price": self.deal_price,
+                    "deal_volume": self.deal_volume,
+                    "deal_money": self.deal_money,
+                    "order_type": self.order_type,
+                    "commisson": self.deal_commisson,
+                    "tax_percent": self.deal_tax,
+                    "order_id": self.order_id,
+                    "order_status": self.order_status, })
 
     @property
     def frozen_money(self):
@@ -151,13 +166,22 @@ class Paperpositon:
         self.old_history = list()
 
     def __repr__(self):
+        return str({"code": self.code,
+                    "code_type": self.code_type,
+                    "cost_money": self.cost_money,
+                    "gpye": self.gpye,
+                    "djsl": self.djsl,
+                    "kyye": self.kyye,
+                    "order_history": self.order_history.to_dict(orient="records"),
+                    })
+
+    def settle(self):
         return {"code": self.code,
                 "code_type": self.code_type,
                 "cost_money": self.cost_money,
                 "gpye": self.gpye,
                 "djsl": self.djsl,
                 "kyye": self.kyye,
-                "order_history": self.order_history.to_dict(orient='records'),
                 }
 
     @property
@@ -165,7 +189,7 @@ class Paperpositon:
         return self.gpye - self.djsl
 
     def add_order(self, order_info: Paperorder, current_time: datetime):
-        self.order_history.append(order_info.order_position, ignore_index=True)
+        self.order_history = self.order_history.append(order_info.order_position, ignore_index=True)
         self.cpt_djsl(current_time)
         self.gpye += order_info.order_position['volume']
         if self.code_type == "stock_cn":
@@ -175,12 +199,13 @@ class Paperpositon:
                 self.old_history.append(self.order_history)
                 self.order_history = order_history_temple
                 self.cost_money = 0
+        self.cpt_djsl(current_time)
 
     def cpt_djsl(self, current_time):
         """计算冻结股票数量：触发时间为每次增加新订单后或者"""
         self.order_history.loc[
-            (self.order_history.datetime.apply(lambda x: x.date()) >= current_time.date() + timedelta(days=self.t)) & (
-                    self.order_history.direction == ORDER_DIRECTION.BUY), "is_frozen"] = 0
+            (self.order_history.datetime.apply(lambda x: x.date() + timedelta(days=self.t)) <= current_time.date()) & (
+                    self.order_history.order_type == ORDER_DIRECTION.BUY), "is_frozen"] = 0
         self.djsl = self.order_history.loc[self.order_history.is_frozen == 1, "volume"].sum()
 
 
@@ -237,14 +262,19 @@ class Papertest:
             "all_money": self.all_money,
             "cash_available": self.cash_available,
             "all_float_profit": self.all_float_profit,
-            "position": self.get_current_position}
+            "position": [posii.settle() for codei, posii in self.get_current_position.items()]}
         self.settle_history.append(settle_dict)
+        # print("settle: ", settle_dict)
 
     @property
     def order_hisotry_dataframe(self) -> pd.DataFrame:
         """获取订单历史的pandas DataFrame"""
-
-        return
+        order_all = []
+        for codei, position in self.position.items():
+            order_all.append(position.order_history)
+            for posi in position.old_history.items():
+                order_all.append(posi)
+        return pd.concat(order_all).sort_values("datetime").reset_index(drop=True)
 
     @property
     def all_money(self) -> float:
@@ -258,13 +288,13 @@ class Papertest:
     @property
     def all_float_profit(self) -> float:
         """浮动盈亏"""
-        return sum([posii.gpye * (self.code_current_price[codei] - posii.cost_money)
+        return sum([posii.gpye * self.code_current_price[codei] - posii.cost_money
                     for codei, posii in self.get_current_position.items()])
 
     @property
     def get_current_position(self) -> dict:
         """获取当前持仓，取持仓股票余额大于0的票返回"""
-        return {codei: posii for codei, posii in self.position.items() if posii.kyye > 0}
+        return {codei: posii for codei, posii in self.position.items() if posii.gpye > 0}
 
     def get_wait_order(self) -> dict:
         """获取未完成的订单"""
@@ -273,7 +303,6 @@ class Papertest:
     def on_current_time(self, current_time):
         """账户时间更新、t+1状态更新、除权除息更新"""
         self.current_time = current_time
-        # todo 持仓状态刷新（ t+1冻结状态修改）
         # todo 除权除息账户修改
         for codei, posii in self.position.items():
             posii.cpt_djsl(self.current_time)
@@ -298,7 +327,6 @@ class Papertest:
                    order_price: float,
                    order_volume: int,
                    order_type: int = ORDER_DIRECTION.BUY,
-                   order_id: str = str(uuid.uuid1())
                    ) -> str:
         """
         :param code: 代码
@@ -306,9 +334,9 @@ class Papertest:
         :param order_price: 委托价格
         :param order_volume: 委托量
         :param order_type: 买卖类型：类 ORDER_DIRECTION
-        :param order_id: 订单id
         :return: order_id
         """
+        order_id = str(uuid.uuid1())
 
         order_create = Paperorder(code=code,
                                   order_time=order_time,
@@ -328,7 +356,6 @@ class Papertest:
 
     def make_deal(self, order_id, deal_volume: int = None, deal_price: float = None, deal_time: datetime = None):
         """成交订单"""
-
         if deal_volume is None:
             self.order[order_id].deal_volume = self.order[order_id].order_volume
         else:
