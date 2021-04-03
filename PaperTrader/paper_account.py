@@ -272,7 +272,7 @@ class Papertest:
         order_all = []
         for codei, position in self.position.items():
             order_all.append(position.order_history)
-            for posi in position.old_history.items():
+            for posi in position.old_history:
                 order_all.append(posi)
         return pd.concat(order_all).sort_values("datetime").reset_index(drop=True)
 
