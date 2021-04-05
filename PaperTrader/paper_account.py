@@ -101,32 +101,32 @@ class Paperorder:
                     "order_status": self.order_status, })
 
     @property
-    def frozen_money(self):
+    def frozen_money(self) -> float:
         return self.order_price * self.order_volume * (1 + self.commisson)
 
     @property
-    def sell_money(self):
+    def sell_money(self) -> float or None:
         if self.order_type == ORDER_DIRECTION.SELL:
             return self.deal_price * self.order_volume * (1 - self.commisson - self.tax_percent)
         else:
             return None
 
     @property
-    def deal_money(self):
+    def deal_money(self) -> float or None:
         if self.deal_price:
             return self.deal_price * self.order_volume * (1 + self.commisson)
         else:
             return None
 
     @property
-    def deal_commisson(self):
+    def deal_commisson(self) -> float or None:
         if self.deal_price:
             return self.deal_price * self.order_volume * self.commisson
         else:
             return None
 
     @property
-    def deal_tax(self):
+    def deal_tax(self) -> float:
         if self.order_type == ORDER_DIRECTION.SELL:
             return self.deal_price * self.order_volume * self.tax_percent
         else:
@@ -161,6 +161,7 @@ class Paperpositon:
         self.cost_money = 0
         self.gpye = 0
         self.djsl = 0
+        self.dividend_money = 0
         self.current_price = None
         self.order_history = order_history_temple  # tips：卖出时候，volume为负数
         self.old_history = list()
@@ -172,6 +173,7 @@ class Paperpositon:
                     "gpye": self.gpye,
                     "djsl": self.djsl,
                     "kyye": self.kyye,
+                    "dividend_money": self.dividend_money,
                     "order_history": self.order_history.to_dict(orient="records"),
                     })
 
@@ -182,6 +184,7 @@ class Paperpositon:
                 "gpye": self.gpye,
                 "djsl": self.djsl,
                 "kyye": self.kyye,
+                "dividend_money": self.dividend_money,
                 }
 
     @property
@@ -194,7 +197,7 @@ class Paperpositon:
         self.gpye += order_info.order_position['volume']
         if self.code_type == "stock_cn":
             if self.gpye > 0 and self.order_history.shape[0] > 0:
-                self.cost_money = self.cost_money + order_info.deal_money
+                self.cost_money += order_info.deal_money
             elif self.gpye == 0 and self.order_history.shape[0] > 0:
                 self.old_history.append(self.order_history)
                 self.order_history = order_history_temple
@@ -292,8 +295,22 @@ class Papertest:
         for codei, posii in self.position.items():
             posii.cpt_djsl(self.current_time)
 
-    def cpt_dividend(self, dividend_df: pd.DataFrame):
-        pass
+    def on_dividend(self, dividend_dict: list):
+        """
+        计算分红和送股，单位：每股
+        :param dividend_dict: [{"code":"601888","split":4,"dividend":0.6}]
+        :return:
+        """
+        # 分红时候余额变化
+        # 除权时股票数量变化
+        if dividend_dict:
+            for spdi in dividend_dict:
+                if spdi["code"] in self.position.keys():
+                    dividend_money = self.position[spdi["code"]].gpye * spdi["dividend"]
+                    self.position[spdi["code"]].dividend_money += dividend_money
+                    self.cash_available += dividend_money
+                    self.position[spdi["code"]].gpye = self.position[spdi["code"]].gpye * (1 + spdi["split"])
+                    print("分红送股：", spdi)
 
     def on_price_change(self, code: str, current_price: float):
         """更新股票当前价格-单个更新"""
