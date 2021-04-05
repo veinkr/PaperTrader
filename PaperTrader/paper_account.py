@@ -202,6 +202,7 @@ class Paperpositon:
                 self.old_history.append(self.order_history)
                 self.order_history = order_history_temple
                 self.cost_money = 0
+                self.dividend_money = 0
         self.cpt_djsl(current_time)
 
     def cpt_djsl(self, current_time):
